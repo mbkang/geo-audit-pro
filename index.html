@@ -724,26 +724,46 @@ document.getElementById('analyzeForm').addEventListener('submit', function(e) {
   showView('analyzing');
   document.getElementById('analyzingUrl').textContent = normalizedUrl;
 
-  // 페이지 title/meta 실제 fetch 시도 (CORS 실패 시 빈 문자열 유지)
+  // 페이지 title/meta 실제 fetch 시도 (프록시 순차 fallback)
   window._pageMeta = '';
   var fetchDone = false;
   var fetchTimeoutId = setTimeout(function(){ fetchDone = true; }, 3500);
-  var proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(normalizedUrl);
-  fetch(proxyUrl)
-    .then(function(res){ return res.json(); })
-    .then(function(data){
-      var html = data.contents || '';
-      var titleM = html.match(/<title[^>]*>([^<]{1,300})<\/title>/i);
-      var metaM  = html.match(/<meta[^>]+(?:name=["']description["'][^>]+content|content[^>]+name=["']description["'])=["']([^"']{1,300})["']/i);
-      var keyM   = html.match(/<meta[^>]+(?:name=["']keywords["'][^>]+content|content[^>]+name=["']keywords["'])=["']([^"']{1,300})["']/i);
-      window._pageMeta = [
-        titleM ? titleM[1] : '',
-        metaM  ? metaM[1]  : '',
-        keyM   ? keyM[1]   : '',
-      ].join(' ').replace(/\s+/g,' ').toLowerCase();
-    })
-    .catch(function(){})
-    .finally(function(){ clearTimeout(fetchTimeoutId); fetchDone = true; });
+
+  var PROXIES = [
+    function(u){ return 'https://api.allorigins.win/get?url=' + encodeURIComponent(u); },
+    function(u){ return 'https://corsproxy.io/?' + encodeURIComponent(u); },
+    function(u){ return 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u); }
+  ];
+
+  function extractMeta(html){
+    var titleM = html.match(/<title[^>]*>([^<]{1,300})<\/title>/i);
+    var metaM  = html.match(/<meta[^>]+(?:name=["']description["'][^>]+content|content[^>]+name=["']description["'])=["']([^"']{1,300})["']/i);
+    var keyM   = html.match(/<meta[^>]+(?:name=["']keywords["'][^>]+content|content[^>]+name=["']keywords["'])=["']([^"']{1,300})["']/i);
+    return [
+      titleM ? titleM[1] : '',
+      metaM  ? metaM[1]  : '',
+      keyM   ? keyM[1]   : '',
+    ].join(' ').replace(/\s+/g,' ').toLowerCase();
+  }
+
+  function tryProxy(idx){
+    if(idx >= PROXIES.length){ clearTimeout(fetchTimeoutId); fetchDone = true; return; }
+    var proxyUrl = PROXIES[idx](normalizedUrl);
+    fetch(proxyUrl, {signal: AbortSignal.timeout(4000)})
+      .then(function(res){
+        if(!res.ok) throw new Error('http '+res.status);
+        return res.text();
+      })
+      .then(function(text){
+        var html = '';
+        try { html = JSON.parse(text).contents || text; } catch(e){ html = text; }
+        if(!html || html.length < 100) throw new Error('empty');
+        window._pageMeta = extractMeta(html);
+        clearTimeout(fetchTimeoutId); fetchDone = true;
+      })
+      .catch(function(){ tryProxy(idx + 1); });
+  }
+  tryProxy(0);
 
   // 안전망: 최대 20초 후 무조건 보고서로 이동
   var safetyTimer = setTimeout(function(){
